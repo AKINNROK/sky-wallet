@@ -425,6 +425,32 @@ let saveT=null,lastSave=null,syncing=false,lastRaw=null,lastProbe=null,pulling=f
 /* ===== Supabase cloud sync ===== */
 const CFGKEY='skywallet:cloud';
 let CLOUD={url:'',key:''},sb=null,sbUser=null,cloudT=null,lastCloud=null,cloudErr='';
+function inIframe(){try{return window.self!==window.top;}catch(e){return true;}}
+function cloudErrMsg(e){
+  const m=(e&&e.message)||String(e||'');
+  if(/Failed to fetch|NetworkError|Load failed|ERR_/i.test(m)){
+    if(inIframe())return'ต่อคลาวด์ไม่ได้ เพราะหน้านี้เปิดอยู่ในกรอบพรีวิว — ต้องเปิดจากลิงก์เว็บจริง (…vercel.app) แล้วค่อยเชื่อมคลาวด์ค่ะ';
+    return'ต่อเซิร์ฟเวอร์ไม่ได้ — เช็ก 3 อย่าง: (1) Project URL ถูกต้องไหม (2) โปรเจกต์ Supabase ถูกพักอยู่หรือเปล่า เข้า dashboard กด Restore (3) ปิด VPN/ตัวบล็อกโฆษณาแล้วลองใหม่';
+  }
+  if(/Invalid login credentials/i.test(m))return'อีเมลหรือรหัสผ่านไม่ถูกต้อง — ถ้ายังไม่เคยสมัคร กด “สมัครใหม่”';
+  if(/already registered|already exists/i.test(m))return'อีเมลนี้สมัครไว้แล้ว — กด “เข้าสู่ระบบ” แทน';
+  if(/Email not confirmed/i.test(m))return'ต้องยืนยันอีเมลก่อน — หรือปิด Confirm email ที่ Supabase → Authentication → Sign In / Providers → Email';
+  if(/Password should be|at least 6/i.test(m))return'รหัสผ่านสั้นไป ต้องอย่างน้อย 6 ตัว';
+  if(/wallet_data.*does not exist|relation .* does not exist/i.test(m))return'ยังไม่ได้สร้างตาราง — กลับไปรัน SQL ขั้นที่ 2 ในคู่มือ';
+  if(/row-level security/i.test(m))return'Policy ไม่ครบ — รัน SQL ขั้นที่ 2 ซ้ำอีกรอบได้เลย';
+  if(/Invalid API key|JWT/i.test(m))return'anon key ไม่ถูกต้อง — ก๊อปใหม่จาก Project Settings → API Keys (ต้องเป็น anon ไม่ใช่ service_role)';
+  return m;
+}
+async function cloudTest(){
+  const u=String(CLOUD.url||'').replace(/\/+$/,'');
+  if(!u||!CLOUD.key)return{ok:false,msg:'ยังไม่ได้ใส่ URL หรือ key'};
+  try{
+    const r=await fetch(u+'/auth/v1/health',{headers:{apikey:CLOUD.key}});
+    if(r.ok)return{ok:true,msg:'เชื่อมต่อได้ปกติ ✓ ใส่อีเมล-รหัสผ่านได้เลย'};
+    if(r.status===401)return{ok:false,msg:'URL ถึงแล้วแต่ anon key ไม่ถูกต้อง — ก๊อปใหม่จาก Project Settings → API Keys'};
+    return{ok:false,msg:'เซิร์ฟเวอร์ตอบกลับรหัส '+r.status+' — ลองเช็ก URL อีกครั้ง'};
+  }catch(e){return{ok:false,msg:cloudErrMsg(e)};}
+}
 function loadCloudCfg(){try{const r=localStorage.getItem(CFGKEY);if(r)CLOUD={...CLOUD,...JSON.parse(r)};}catch(e){}}
 function saveCloudCfg(){try{localStorage.setItem(CFGKEY,JSON.stringify(CLOUD));}catch(e){}}
 const cloudReady=()=>!!(sb&&sbUser);
@@ -458,7 +484,7 @@ async function cloudPull(silent){
       return true;
     }
     return false;
-  }catch(e){cloudErr=e.message||String(e);return false;}
+  }catch(e){cloudErr=cloudErrMsg(e);return false;}
 }
 async function cloudPush(){
   if(!cloudReady())return false;
@@ -468,7 +494,7 @@ async function cloudPush(){
       .upsert({user_id:sbUser.id,data:S,updated_at:new Date().toISOString()},{onConflict:'user_id'});
     if(error)throw error;
     lastCloud=new Date();cloudErr='';paintSync(true);return true;
-  }catch(e){cloudErr=e.message||String(e);return false;}
+  }catch(e){cloudErr=cloudErrMsg(e);return false;}
 }
 function cloudSchedule(){ if(!cloudReady())return; clearTimeout(cloudT); cloudT=setTimeout(cloudPush,1800); }
 async function cloudSyncNow(){
@@ -576,7 +602,7 @@ function syncSheet(){
   };
   draw();
 }
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2000);}
+function toast(m,ms){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms||2000);}
 
 /* ---------- wallets ---------- */
 const WKIND={cash:{n:'เงินสด',e:'👛'},bank:{n:'บัญชีธนาคาร',e:'🏦'},credit:{n:'บัตรเครดิต',e:'💳'},ewallet:{n:'วอลเล็ต',e:'📲'}};
@@ -1673,31 +1699,49 @@ function cloudSheet(){
   const draw=()=>{
     if(!CLOUD.url||!CLOUD.key){
       openMd(`<h3>☁️ ตั้งค่าคลาวด์ (Supabase)</h3>
-        <div class="info"><span>1️⃣</span><span>สร้างโปรเจกต์ฟรีที่ <b>supabase.com</b> → เมนู <b>Project Settings → API</b> แล้วคัดลอก 2 ค่านี้มาวาง (ดูวิธีละเอียดในไฟล์คู่มือ)</span></div>
+        ${inIframe()?`<div class="info warn"><span>⚠️</span><span>หน้านี้เปิดอยู่ใน<b>กรอบพรีวิว</b> ซึ่งต่อคลาวด์ไม่ได้ — เปิดแอปจาก<b>ลิงก์เว็บจริง</b> (…vercel.app) ก่อนแล้วค่อยตั้งค่าคลาวด์ค่ะ</span></div>`:''}
+        <div class="info"><span>1️⃣</span><span>สร้างโปรเจกต์ฟรีที่ <b>supabase.com</b> → เมนู <b>Project Settings → API Keys</b> แล้วคัดลอก 2 ค่านี้มาวาง (ดูวิธีละเอียดในไฟล์คู่มือ)</span></div>
         <div class="field" style="margin-top:12px"><label class="f">Project URL</label>
           <input id="cU" type="text" placeholder="https://xxxxxxxx.supabase.co" value="${esc(CLOUD.url)}"></div>
         <div class="field"><label class="f">anon public key</label>
           <input id="cK" type="text" placeholder="eyJhbGciOiJIUzI1NiIs..." value="${esc(CLOUD.key)}"></div>
-        <button class="btn full" id="cOkBtn" style="margin-top:14px">บันทึกและเชื่อมต่อ</button>`);
+        <div class="row" style="margin-top:14px;gap:9px">
+          <button class="btn ghost" id="cTest" style="flex:1">🩺 ทดสอบ</button>
+          <button class="btn" id="cOkBtn" style="flex:1.4">บันทึกและเชื่อมต่อ</button></div>
+        <div class="tiny" id="cMsg" style="margin-top:10px;text-align:center;min-height:20px"></div>`);
+      $('#cTest').onclick=async()=>{
+        CLOUD={url:$('#cU').value.trim(),key:$('#cK').value.trim()};
+        $('#cMsg').textContent='กำลังทดสอบ…';
+        const r=await cloudTest();
+        $('#cMsg').innerHTML=`<span style="color:${r.ok?'var(--in)':'var(--out)'}">${esc(r.msg)}</span>`;
+      };
       $('#cOkBtn').onclick=async()=>{
         const u=$('#cU').value.trim(),k=$('#cK').value.trim();
         if(!/^https:\/\/.+\.supabase\.co/.test(u)){toast('Project URL ต้องขึ้นต้นด้วย https:// และลงท้าย .supabase.co');return;}
         if(k.length<40){toast('anon key ดูสั้นเกินไป ลองคัดลอกใหม่');return;}
         CLOUD={url:u,key:k};saveCloudCfg();
         toast('กำลังเชื่อมต่อ…');
-        try{await sbInit();draw();}catch(e){toast(e.message||'เชื่อมต่อไม่สำเร็จ');}
+        const t=await cloudTest();
+        if(!t.ok){$('#cMsg').innerHTML=`<span style="color:var(--out)">${esc(t.msg)}</span>`;toast(t.msg,5000);return;}
+        try{await sbInit();draw();}catch(e){toast(cloudErrMsg(e),5000);}
       };
       return;
     }
     if(!sbUser){
       openMd(`<h3>🔑 เข้าสู่ระบบคลาวด์</h3>
+        ${inIframe()?`<div class="info warn" style="margin-bottom:12px"><span>⚠️</span><span>หน้านี้อยู่ใน<b>กรอบพรีวิว</b> — คลาวด์จะขึ้น “Failed to fetch” เสมอ ต้องเปิดจาก<b>ลิงก์เว็บจริง</b>ก่อนค่ะ</span></div>`:''}
         <div class="field"><label class="f">อีเมล</label><input id="cE" type="text" inputmode="email" placeholder="you@email.com"></div>
         <div class="field"><label class="f">รหัสผ่าน (อย่างน้อย 6 ตัว)</label><input id="cP" type="text" placeholder="••••••"></div>
         <div class="row" style="margin-top:14px;gap:9px">
           <button class="btn ghost" id="cSignup" style="flex:1">สมัครใหม่</button>
           <button class="btn" id="cLogin" style="flex:1.2">เข้าสู่ระบบ</button></div>
         <div class="info" style="margin-top:12px"><span>💡</span><span>เครื่องแรก: กด <b>สมัครใหม่</b> · เครื่องที่สอง: ใช้อีเมล-รหัสผ่านเดิมแล้วกด <b>เข้าสู่ระบบ</b></span></div>
-        <button class="btn ghost full" id="cReset" style="margin-top:12px">เปลี่ยน URL / key</button>`);
+        <div class="tiny" id="cMsg" style="margin-top:10px;text-align:center;min-height:20px"></div>
+        <div class="row" style="margin-top:8px;gap:9px">
+          <button class="btn ghost" id="cTest2" style="flex:1">🩺 ทดสอบการเชื่อมต่อ</button>
+          <button class="btn ghost" id="cReset" style="flex:1">เปลี่ยน URL / key</button></div>`);
+      $('#cTest2').onclick=async()=>{$('#cMsg').textContent='กำลังทดสอบ…';const r=await cloudTest();
+        $('#cMsg').innerHTML=`<span style="color:${r.ok?'var(--in)':'var(--out)'}">${esc(r.msg)}</span>`;};
       const go=async(mode)=>{
         const em=$('#cE').value.trim(),pw=$('#cP').value;
         if(!em||!pw){toast('กรอกอีเมลและรหัสผ่านก่อนนะคะ');return;}
@@ -1710,7 +1754,7 @@ function cloudSheet(){
           const pulled=await cloudPull(true);
           if(!pulled)await cloudPush();
           draw();toast(pulled?'เข้าสู่ระบบและดึงข้อมูลแล้ว ☁️':'เข้าสู่ระบบและอัปโหลดข้อมูลแล้ว ☁️');
-        }catch(e){toast(e.message||'เข้าสู่ระบบไม่สำเร็จ');}
+        }catch(e){const m=cloudErrMsg(e);const el=$('#cMsg');if(el)el.innerHTML=`<span style="color:var(--out)">${esc(m)}</span>`;toast(m,5000);}
       };
       $('#cLogin').onclick=()=>go('in');
       $('#cSignup').onclick=()=>go('up');
