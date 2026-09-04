@@ -1,0 +1,25 @@
+{
+  "name": "Sky Wallet — กระเป๋าตังของฉัน",
+  "short_name": "Sky Wallet",
+  "description": "แอปบันทึกรายรับรายจ่าย วางแผนการเงิน จัดการกระเป๋าและบัตรเครดิต ใช้ได้ทั้งมือถือ แท็บเล็ต และคอมพิวเตอร์",
+  "id": "/sky-wallet/",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#E9F5FE",
+  "theme_color": "#8FD0F7",
+  "lang": "th",
+  "dir": "ltr",
+  "categories": ["finance", "productivity", "lifestyle"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "เพิ่มรายจ่าย", "short_name": "รายจ่าย", "url": "./index.html?add=out", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "เพิ่มรายรับ", "short_name": "รายรับ", "url": "./index.html?add=in", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+  ]
+}
