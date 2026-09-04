@@ -66,6 +66,7 @@ h1,h2,h3,.cute{font-family:var(--cute)}
 .syncbtn.s-claude .dot{background:#34D399}
 .syncbtn.s-local .dot{background:#FBBF24}
 .syncbtn.s-memory .dot{background:#FB7185}
+.syncbtn.s-cloud .dot{background:#22C55E}
 .syncbtn.busy svg{animation:spin 1s linear infinite}
 .syncbtn.saved{animation:pop .5s ease}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -420,14 +421,74 @@ const TH_D=['อา','จ','อ','พ','พฤ','ศ','ส'];
 const TH_M=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 const TH_MF=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
 const dLab=d=>`${d.getDate()} ${TH_M[d.getMonth()]} ${(d.getFullYear()+543)%100}`;
-let saveT=null,lastSave=null,syncing=false,lastRaw=null,pulling=false;
+let saveT=null,lastSave=null,syncing=false,lastRaw=null,lastProbe=null,pulling=false;
+/* ===== Supabase cloud sync ===== */
+const CFGKEY='skywallet:cloud';
+let CLOUD={url:'',key:''},sb=null,sbUser=null,cloudT=null,lastCloud=null,cloudErr='';
+function loadCloudCfg(){try{const r=localStorage.getItem(CFGKEY);if(r)CLOUD={...CLOUD,...JSON.parse(r)};}catch(e){}}
+function saveCloudCfg(){try{localStorage.setItem(CFGKEY,JSON.stringify(CLOUD));}catch(e){}}
+const cloudReady=()=>!!(sb&&sbUser);
+function loadSbLib(){return new Promise((res,rej)=>{
+  if(window.supabase&&window.supabase.createClient)return res();
+  const el=document.createElement('script');
+  el.src='https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js';
+  el.onload=()=>res();el.onerror=()=>rej(new Error('โหลดไลบรารี Supabase ไม่สำเร็จ (ต้องมีอินเทอร์เน็ต)'));
+  document.head.appendChild(el);});}
+async function sbInit(){
+  if(!CLOUD.url||!CLOUD.key)return null;
+  if(!sb){ await loadSbLib();
+    sb=window.supabase.createClient(CLOUD.url.replace(/\/+$/,''),CLOUD.key,{auth:{persistSession:true,autoRefreshToken:true}}); }
+  try{const{data}=await sb.auth.getSession();sbUser=data&&data.session?data.session.user:null;}catch(e){sbUser=null;}
+  paintSync();return sb;
+}
+async function cloudPull(silent){
+  if(!cloudReady())return false;
+  try{
+    const{data,error}=await sb.from('wallet_data').select('data').eq('user_id',sbUser.id).maybeSingle();
+    if(error)throw error;
+    if(!data||!data.data)return false;
+    const remote=data.data;
+    const rT=Number(remote.updatedAt||0),lT=Number(S.updatedAt||0);
+    if(rT>lT){
+      S={...S,...remote};migrate();
+      lastRaw=JSON.stringify(S);lastProbe=JSON.stringify({...S,updatedAt:0});
+      await Store.set(KEY,lastRaw);lastCloud=new Date();
+      if(addOpen)renderAdd();render();paintSync(true);
+      if(!silent)toast('ดึงข้อมูลจากคลาวด์แล้ว ☁️');
+      return true;
+    }
+    return false;
+  }catch(e){cloudErr=e.message||String(e);return false;}
+}
+async function cloudPush(){
+  if(!cloudReady())return false;
+  try{
+    if(!S.updatedAt)S.updatedAt=Date.now();
+    const{error}=await sb.from('wallet_data')
+      .upsert({user_id:sbUser.id,data:S,updated_at:new Date().toISOString()},{onConflict:'user_id'});
+    if(error)throw error;
+    lastCloud=new Date();cloudErr='';paintSync(true);return true;
+  }catch(e){cloudErr=e.message||String(e);return false;}
+}
+function cloudSchedule(){ if(!cloudReady())return; clearTimeout(cloudT); cloudT=setTimeout(cloudPush,1800); }
+async function cloudSyncNow(){
+  if(!cloudReady())return false;
+  syncing=true;paintSync();
+  const pulled=await cloudPull(true);
+  if(!pulled)await cloudPush();
+  syncing=false;paintSync(true);
+  return true;
+}
 const save=()=>{clearTimeout(saveT);saveT=setTimeout(flushSave,250);};
 async function flushSave(){
   clearTimeout(saveT);
+  const probe=JSON.stringify({...S,updatedAt:0});
+  if(probe===lastProbe)return true;
+  S.updatedAt=Date.now();
   const raw=JSON.stringify(S);
-  if(raw===lastRaw)return true;
   const ok=await Store.set(KEY,raw);
-  if(ok){lastRaw=raw;lastSave=new Date();paintSync(true);}
+  if(ok){lastRaw=raw;lastProbe=probe;lastSave=new Date();paintSync(true);}
+  cloudSchedule();
   return ok;
 }
 function hardSave(){ // synchronous fallback when the app is closing
@@ -435,6 +496,7 @@ function hardSave(){ // synchronous fallback when the app is closing
   flushSave();
 }
 async function autoPull(silent){
+  if(cloudReady())cloudPull(true);
   if(pulling)return;
   try{if($('#md')&&$('#md').classList.contains('open'))return;}catch(e){}
   pulling=true;
@@ -459,22 +521,25 @@ function devName(){
   if(/Android/i.test(ua))return'📱 แท็บเล็ต Android';
   return'💻 คอมพิวเตอร์';
 }
-const SYNC={claude:{e:'☁️',n:'ซิงก์ข้ามอุปกรณ์',c:'var(--in)',
+const SYNC={cloud:{e:'☁️',n:'ซิงก์คลาวด์ (Supabase)',c:'var(--in)',
+    d:'ข้อมูลเก็บบนคลาวด์ของคุณเอง ทุกเครื่องที่ล็อกอินบัญชีเดียวกันจะเห็นข้อมูลชุดเดียวกันอัตโนมัติ'},
+  claude:{e:'☁️',n:'ซิงก์ข้ามอุปกรณ์',c:'var(--in)',
     d:'ข้อมูลเก็บกับบัญชี Claude ของคุณ เปิดจากมือถือ ไอแพด หรือแม็คบุ๊ก ก็เห็นชุดเดียวกันอัตโนมัติ'},
   local:{e:'🖥️',n:'บันทึกในเครื่องนี้',c:'var(--gold)',
     d:'ข้อมูลอยู่ในเบราว์เซอร์ของอุปกรณ์นี้เท่านั้น ยังไม่ซิงก์ไปเครื่องอื่น — ใช้ “สำรองข้อมูล” แล้ว “นำเข้า” ที่อีกเครื่องเพื่อย้ายข้อมูล'},
   memory:{e:'⚠️',n:'โหมดชั่วคราว',c:'var(--out)',
     d:'อุปกรณ์นี้ไม่อนุญาตให้บันทึกถาวร ข้อมูลจะหายเมื่อปิดหน้า — กรุณาสำรองข้อมูลก่อนปิดทุกครั้ง'}};
+function syncState(){return cloudReady()?'cloud':(SYNC[Store.mode]?Store.mode:'memory');}
 function paintSync(justSaved){
   const b=$('#syncBtn');if(!b)return;
-  b.classList.remove('s-claude','s-local','s-memory');
-  b.classList.add('s-'+(SYNC[Store.mode]?Store.mode:'memory'));
+  b.classList.remove('s-claude','s-local','s-memory','s-cloud');
+  b.classList.add('s-'+syncState());
   b.classList.toggle('busy',!!syncing);
   if(justSaved){b.classList.remove('saved');void b.offsetWidth;b.classList.add('saved');}
 }
 function dataKB(){try{return Math.round(JSON.stringify(S).length/1024*10)/10;}catch(e){return 0;}}
 function syncSheet(){
-  const st=SYNC[Store.mode]||SYNC.memory;
+  const st=SYNC[syncState()]||SYNC.memory;
   const draw=()=>{
     openMd(`<h3>🔗 สถานะการเชื่อมต่อข้อมูล</h3>
       <div class="card pad" style="box-shadow:none;background:var(--soft);text-align:center">
@@ -494,10 +559,13 @@ function syncSheet(){
         <button class="btn ghost" id="syBk" style="flex:1">💾 สำรองไฟล์</button>
         <button class="btn ghost" id="syIm" style="flex:1">📥 นำเข้าไฟล์</button>
         <button class="btn" id="syGo" style="flex:1.1">🔄 ซิงก์</button></div>
-      <div class="info" style="margin-top:10px"><span>📱💻</span><span>ย้ายข้อมูลข้ามเครื่อง: กด <b>สำรองไฟล์</b> ที่เครื่องเดิม → ส่งไฟล์ไปอีกเครื่อง (LINE/อีเมล) → กด <b>นำเข้าไฟล์</b> ที่เครื่องใหม่</span></div>
+      <h2 class="sec" style="margin:18px 0 8px">☁️ ซิงก์ข้ามเครื่อง (Supabase)</h2>
+      <div class="card mlist" style="box-shadow:none;background:var(--soft)">${cloudRow()}</div>
+      ${cloudReady()?'':`<div class="info" style="margin-top:10px"><span>📱💻</span><span>ยังไม่ได้เปิดคลาวด์ก็ย้ายข้อมูลได้: กด <b>สำรองไฟล์</b> ที่เครื่องเดิม → ส่งไฟล์ไปอีกเครื่อง → กด <b>นำเข้าไฟล์</b></span></div>`}
       ${Store.mode!=='claude'?`<div class="info" style="margin-top:12px"><span>💡</span><span>อยากให้ซิงก์ข้ามเครื่องอัตโนมัติ ให้เปิดแอปนี้ในแอป Claude (มือถือ/ไอแพด/แม็คบุ๊ก) ด้วยบัญชีเดียวกัน</span></div>`:''}`);
     $('#syBk').onclick=()=>{download(`sky-wallet-${key(new Date())}.json`,JSON.stringify(S,null,2),'application/json');toast('สำรองข้อมูลแล้ว ✓');};
     $('#syIm').onclick=()=>{closeMd();importJSON();};
+    const cb=$('#cloudBtn'); if(cb)cb.onclick=()=>{closeMd();cloudSheet();};
     $('#syGo').onclick=async()=>{
       syncing=true;paintSync();draw();
       const ok=await flushSave();
@@ -512,7 +580,9 @@ function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');cl
 
 /* ---------- wallets ---------- */
 const WKIND={cash:{n:'เงินสด',e:'👛'},bank:{n:'บัญชีธนาคาร',e:'🏦'},credit:{n:'บัตรเครดิต',e:'💳'},ewallet:{n:'วอลเล็ต',e:'📲'}};
-const walOf=id=>S.wallets.find(w=>w.id===id)||S.wallets[0];
+const walOf=id=>S.wallets.find(w=>w.id===id)||S.wallets[0]||null;
+const firstPay=()=>payWallets()[0]||S.wallets[0]||null;
+const hasWal=()=>S.wallets.length>0;
 function walBal(id){
   const w=walOf(id); if(!w)return 0;
   let b=Number(w.open||0);
@@ -662,6 +732,10 @@ function secCalendar(){
     <div class="cal">${['จ','อ','พ','พฤ','ศ','ส','อา'].map(x=>`<div class="dow">${x}</div>`).join('')}${cells}</div></div>`;
 }
 function secWallets(){
+  if(!hasWal())return`<h2 class="sec">👛 กระเป๋า</h2><div class="card" style="margin-bottom:12px">
+    <div class="empty" style="padding:24px 18px"><div class="em">👛</div><div class="big">ยังไม่มีกระเป๋า</div>
+    <div class="tiny">สร้างกระเป๋าใบแรกก่อนเริ่มบันทึกรายการ</div>
+    <div style="margin-top:12px"><button class="btn" data-newwal="1">＋ เพิ่มกระเป๋า</button></div></div></div>`;
   return`<h2 class="sec">👛 ยอดคงเหลือ <span class="tiny muted" style="font-weight:400">จาก ${S.wallets.length} กระเป๋า</span>
     <span style="margin-left:auto" class="num cute">฿${money(totalBal())}</span></h2>
     <div class="wgrid" style="margin-bottom:12px">${S.wallets.map(w=>{const b=walBal(w.id);
@@ -775,10 +849,16 @@ function viewWallet(){
   h+=`<div class="card pad" style="background:linear-gradient(160deg,#EAF6FE,#D9EDFB);margin-bottom:14px">
     <div class="tiny muted">ยอดรวมทุกกระเป๋า</div>
     <div class="cute" style="font-size:30px;font-weight:700;color:var(--deep)">฿${money(totalBal())}</div></div>`;
+  if(!hasWal())return h+`<div class="card"><div class="empty"><div class="em">👛</div>
+    <div class="big">ยังไม่มีกระเป๋า</div>
+    <div class="tiny">กดปุ่ม <b>＋ เพิ่ม</b> ด้านบน เพื่อสร้างกระเป๋าใบแรก<br>เช่น เงินสด · บัญชีธนาคาร · บัตรเครดิต</div>
+    <div class="row" style="justify-content:center;gap:9px;margin-top:14px">
+      <button class="btn" data-newwal="1">＋ เพิ่มกระเป๋า</button>
+      <button class="btn ghost" data-newcard="1">＋ บัตรเครดิต</button></div></div></div>`;
   h+=`<div class="card">`;
   S.wallets.forEach(w=>{const b=walBal(w.id),k=WKIND[w.kind]||WKIND.cash;
     h+=`<button class="tx" data-editwal="${w.id}"><span class="ic">${w.emoji}</span>
-      <span class="mid"><span class="t1">${esc(w.name)}</span><br><span class="t2">${k.n}${w.kind==='credit'&&w.limit?` · วงเงิน ${money(w.limit)}`:''}</span></span>
+      <span class="mid"><span class="t1">${esc(w.name)}</span><br><span class="t2">${w.note?esc(w.note):k.n}${w.kind==='credit'&&w.limit?` · วงเงิน ${money(w.limit)}`:''}</span></span>
       <span style="text-align:right"><span class="amt num" style="color:${b<0?'var(--out)':'var(--deep)'}">${money(b)}</span>
       ${w.kind==='credit'&&w.limit?`<br><span class="tiny muted">ใช้ได้ ${money(Number(w.limit)+b)}</span>`:''}</span></button>`;});
   h+=`</div>`;
@@ -1119,7 +1199,7 @@ function addHTML(){
   const t=AD.tab;
   const cats=S.cats[t==='in'?'in':'out'];
   if((t==='out'||t==='in')&&!cats.find(c=>c.id===AD.cat))AD.cat=cats[0].id;
-  const w=walOf(AD.w)||S.wallets[0],w2=AD.w2?walOf(AD.w2):null;
+  const w=walOf(AD.w),w2=AD.w2?walOf(AD.w2):null;
   let body='';
   if(t==='out'||t==='in'){
     body+=`<button class="wsel" data-wsel="1"><span class="e">${w?w.emoji:'👛'}</span>
@@ -1213,11 +1293,11 @@ function renderAdd(){
   }
 }
 function openAdd(tab){
-  if(!S.wallets.length)S.wallets=[{id:uid(),name:'เงินสด',emoji:'👛',kind:'cash',open:0}];
+  if(!hasWal()){toast('เพิ่มกระเป๋าก่อนนะคะ 👛');go('wallet');walSheet(null);return;}
   addOpen=true;AD.tab=tab||AD.tab;AD.expr='';AD.note='';AD.date=key(new Date());addCatQ='';
-  if(!AD.w||!walOf(AD.w))AD.w=(payWallets()[0]||S.wallets[0]).id;
+  if(!AD.w||!walOf(AD.w)){const fp=firstPay();AD.w=fp?fp.id:null;}
   if(AD.tab==='cc'){const c=creditWallets();AD.w2=c.length?c[0].id:null;
-    const p=payWallets();AD.w=p.length?p[0].id:S.wallets[0].id;}
+    const p=payWallets();AD.w=p.length?p[0].id:(S.wallets[0]?S.wallets[0].id:null);}
   if(AD.tab==='tf'&&S.wallets.length>1){const o=S.wallets.find(x=>x.id!==AD.w);AD.w2=o?o.id:null;}
   if(AD.tab==='inst'){const d=(S.debts||[]).find(x=>(x.paid||0)<x.n);AD.debt=d?d.id:null;if(d)AD.expr=String(d.per);}
   renderAdd();
@@ -1251,6 +1331,7 @@ function saveAdd(){
   if(!v||v<=0){toast('ใส่จำนวนเงินก่อนนะคะ');return;}
   const t=AD.tab;
   if(t==='out'||t==='in'){
+    if(!AD.w){toast('เลือกกระเป๋าก่อนนะคะ 👛');return;}
     S.tx.push({id:uid(),type:t,amount:v,cat:AD.cat,note:AD.note.trim(),date:AD.date,ts:Date.now(),w:AD.w});
     toast(`บันทึกแล้ว ${t==='in'?'+':'-'}฿${money(v)} 🎉`);
   }else if(t==='cc'){
@@ -1368,12 +1449,15 @@ function editTx(id){
     S.tx=S.tx.filter(x=>x.id!==id);save();closeMd();render();toast('ลบแล้ว');};
 }
 function walSheet(id,preset){
-  const w=id?walOf(id):{name:'',emoji:preset==='credit'?'💳':'👛',kind:preset||'cash',open:'',limit:'',stmt:0,due:0};
+  const w=id?walOf(id):{name:'',emoji:preset==='credit'?'💳':'👛',kind:preset||'cash',open:'',limit:'',stmt:0,due:0,note:''};
+  if(!w)return;
   openMd(`<h3>👛 ${id?'แก้ไข':'เพิ่ม'}กระเป๋า</h3>
     <div class="field"><label class="f">ชื่อกระเป๋า</label><input id="wN" type="text" placeholder="เช่น เงินสด, กสิกร, บัตร KTC" value="${esc(w.name)}"></div>
     <div class="field"><label class="f">ประเภท</label><select id="wK">${Object.entries(WKIND).map(([k,v])=>`<option value="${k}" ${w.kind===k?'selected':''}>${v.e} ${v.n}</option>`).join('')}</select></div>
     <div class="field"><label class="f">ไอคอน</label><div class="emopick" id="wE">${EMOJIS.map(e=>`<button data-emo="${e}" class="${w.emoji===e?'on':''}">${e}</button>`).join('')}</div></div>
-    <div class="field"><label class="f" id="wOL">ยอดตั้งต้น (บาท)</label>
+    <div class="field"><label class="f">📝 รายละเอียดกระเป๋า</label>
+      <input id="wNote" type="text" placeholder="เช่น บัญชีออมทรัพย์ ...1234 · บัตรหลัก · เงินใช้ประจำวัน" value="${esc(w.note||'')}"></div>
+    <div class="field"><label class="f" id="wOL">ยอดเงินในกระเป๋าตอนนี้ (บาท)</label>
       <input id="wO" type="number" inputmode="decimal" placeholder="0" value="${w.kind==='credit'?(w.open?Math.abs(w.open):''):(w.open||'')}"></div>
     <div id="wCredit" style="display:none">
       <div class="field"><label class="f">วงเงินบัตร (บาท)</label><input id="wL" type="number" inputmode="decimal" placeholder="เช่น 50000" value="${w.limit||''}"></div>
@@ -1388,13 +1472,14 @@ function walSheet(id,preset){
     $('#wE').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');});
   const syncKind=()=>{const k=$('#wK').value;
     $('#wCredit').style.display=k==='credit'?'block':'none';
-    $('#wOL').textContent=k==='credit'?'ยอดค้างชำระตอนนี้ (บาท)':'ยอดตั้งต้น (บาท)';};
+    $('#wOL').textContent=k==='credit'?'ยอดค้างชำระตอนนี้ (บาท)':'ยอดเงินในกระเป๋าตอนนี้ (บาท)';};
   $('#wK').onchange=syncKind;syncKind();
   $('#wOk').onclick=()=>{const n=$('#wN').value.trim();if(!n){toast('ใส่ชื่อกระเป๋าก่อนนะคะ');return;}
     const kind=$('#wK').value;
     let op=parseFloat($('#wO').value)||0;
     if(kind==='credit')op=-Math.abs(op);
-    const o={id:id||uid(),name:n,emoji:emo,kind,open:op,limit:parseFloat($('#wL').value)||0,
+    const o={id:id||uid(),name:n,emoji:emo,kind,open:op,note:$('#wNote').value.trim(),
+      limit:parseFloat($('#wL').value)||0,
       stmt:Number($('#wS').value)||0,due:Number($('#wD').value)||0};
     if(id)Object.assign(w,o);else S.wallets.push(o);
     save();closeMd();render();toast('บันทึกกระเป๋าแล้ว 👛');};
@@ -1468,7 +1553,7 @@ function fixSheet(id){
   if(id)$('#fDel').onclick=()=>{S.fixed=S.fixed.filter(x=>x.id!==id);save();closeMd();render();toast('ลบแล้ว');};}
 function postFixed(f,M){if(f.on===false)return false;if(f.posted&&f.posted[M])return false;
   const[y,m]=M.split('-').map(Number),last=new Date(y,m,0).getDate();
-  S.tx.push({id:uid(),type:f.type,amount:f.amount,cat:f.cat,note:f.name,date:`${y}-${pad(m)}-${pad(Math.min(f.day||1,last))}`,ts:Date.now(),fx:f.id,w:(payWallets()[0]||S.wallets[0]).id});
+  S.tx.push({id:uid(),type:f.type,amount:f.amount,cat:f.cat,note:f.name,date:`${y}-${pad(m)}-${pad(Math.min(f.day||1,last))}`,ts:Date.now(),fx:f.id,w:(firstPay()||{}).id});
   f.posted=f.posted||{};f.posted[M]=true;return true;}
 function debtSheet(id){
   const D=S.debts||[];const d=id?D.find(x=>x.id===id):{name:'',emoji:'💳',creditor:'',per:'',n:'',paid:0,day:1};
@@ -1573,6 +1658,87 @@ function debtHistory(id){
       `<div class="bline row"><span style="flex:1">${esc(t.note||'ชำระค่างวด')}</span><span class="tiny muted">${dLab(parse(t.date))}</span>
        <span class="num neg" style="min-width:70px;text-align:right">${money(t.amount)}</span></div>`).join('')
      :`<div class="empty tiny">ยังไม่มีประวัติการชำระที่บันทึกผ่านแอป</div>`}</div>`);
+}
+function cloudRow(){
+  if(!CLOUD.url||!CLOUD.key)
+    return`<button id="cloudBtn"><span class="e">🔌</span><span class="t"><b>ยังไม่ได้ตั้งค่าคลาวด์</b>
+      <span>เชื่อม Supabase ฟรี เพื่อให้มือถือกับคอมเห็นข้อมูลชุดเดียวกัน</span></span><span class="muted">›</span></button>`;
+  if(!sbUser)
+    return`<button id="cloudBtn"><span class="e">🔑</span><span class="t"><b>ตั้งค่าแล้ว — ยังไม่ได้เข้าสู่ระบบ</b>
+      <span>เข้าสู่ระบบด้วยอีเมลเพื่อเริ่มซิงก์</span></span><span class="muted">›</span></button>`;
+  return`<button id="cloudBtn"><span class="e">✅</span><span class="t"><b>${esc(sbUser.email||'เข้าสู่ระบบแล้ว')}</b>
+    <span>ซิงก์ล่าสุด ${lastCloud?lastCloud.toLocaleTimeString('th-TH'):'—'}${cloudErr?' · ⚠️ '+esc(cloudErr):''}</span></span><span class="muted">›</span></button>`;
+}
+function cloudSheet(){
+  const draw=()=>{
+    if(!CLOUD.url||!CLOUD.key){
+      openMd(`<h3>☁️ ตั้งค่าคลาวด์ (Supabase)</h3>
+        <div class="info"><span>1️⃣</span><span>สร้างโปรเจกต์ฟรีที่ <b>supabase.com</b> → เมนู <b>Project Settings → API</b> แล้วคัดลอก 2 ค่านี้มาวาง (ดูวิธีละเอียดในไฟล์คู่มือ)</span></div>
+        <div class="field" style="margin-top:12px"><label class="f">Project URL</label>
+          <input id="cU" type="text" placeholder="https://xxxxxxxx.supabase.co" value="${esc(CLOUD.url)}"></div>
+        <div class="field"><label class="f">anon public key</label>
+          <input id="cK" type="text" placeholder="eyJhbGciOiJIUzI1NiIs..." value="${esc(CLOUD.key)}"></div>
+        <button class="btn full" id="cOkBtn" style="margin-top:14px">บันทึกและเชื่อมต่อ</button>`);
+      $('#cOkBtn').onclick=async()=>{
+        const u=$('#cU').value.trim(),k=$('#cK').value.trim();
+        if(!/^https:\/\/.+\.supabase\.co/.test(u)){toast('Project URL ต้องขึ้นต้นด้วย https:// และลงท้าย .supabase.co');return;}
+        if(k.length<40){toast('anon key ดูสั้นเกินไป ลองคัดลอกใหม่');return;}
+        CLOUD={url:u,key:k};saveCloudCfg();
+        toast('กำลังเชื่อมต่อ…');
+        try{await sbInit();draw();}catch(e){toast(e.message||'เชื่อมต่อไม่สำเร็จ');}
+      };
+      return;
+    }
+    if(!sbUser){
+      openMd(`<h3>🔑 เข้าสู่ระบบคลาวด์</h3>
+        <div class="field"><label class="f">อีเมล</label><input id="cE" type="text" inputmode="email" placeholder="you@email.com"></div>
+        <div class="field"><label class="f">รหัสผ่าน (อย่างน้อย 6 ตัว)</label><input id="cP" type="text" placeholder="••••••"></div>
+        <div class="row" style="margin-top:14px;gap:9px">
+          <button class="btn ghost" id="cSignup" style="flex:1">สมัครใหม่</button>
+          <button class="btn" id="cLogin" style="flex:1.2">เข้าสู่ระบบ</button></div>
+        <div class="info" style="margin-top:12px"><span>💡</span><span>เครื่องแรก: กด <b>สมัครใหม่</b> · เครื่องที่สอง: ใช้อีเมล-รหัสผ่านเดิมแล้วกด <b>เข้าสู่ระบบ</b></span></div>
+        <button class="btn ghost full" id="cReset" style="margin-top:12px">เปลี่ยน URL / key</button>`);
+      const go=async(mode)=>{
+        const em=$('#cE').value.trim(),pw=$('#cP').value;
+        if(!em||!pw){toast('กรอกอีเมลและรหัสผ่านก่อนนะคะ');return;}
+        try{
+          const r=mode==='up'?await sb.auth.signUp({email:em,password:pw})
+                             :await sb.auth.signInWithPassword({email:em,password:pw});
+          if(r.error)throw r.error;
+          if(!r.data.session){toast('สมัครแล้ว — เปิดอีเมลกดยืนยันก่อน หรือปิด Confirm email ใน Supabase');return;}
+          sbUser=r.data.session.user;paintSync();
+          const pulled=await cloudPull(true);
+          if(!pulled)await cloudPush();
+          draw();toast(pulled?'เข้าสู่ระบบและดึงข้อมูลแล้ว ☁️':'เข้าสู่ระบบและอัปโหลดข้อมูลแล้ว ☁️');
+        }catch(e){toast(e.message||'เข้าสู่ระบบไม่สำเร็จ');}
+      };
+      $('#cLogin').onclick=()=>go('in');
+      $('#cSignup').onclick=()=>go('up');
+      $('#cReset').onclick=()=>{CLOUD={url:'',key:''};saveCloudCfg();sb=null;sbUser=null;paintSync();draw();};
+      return;
+    }
+    openMd(`<h3>☁️ ซิงก์คลาวด์</h3>
+      <div class="card pad" style="box-shadow:none;background:var(--soft);text-align:center">
+        <div style="font-size:32px">✅</div>
+        <div class="cute" style="font-size:18px;font-weight:700;color:var(--in)">เชื่อมต่อแล้ว</div>
+        <div class="tiny muted" style="margin-top:4px">${esc(sbUser.email||'')}</div></div>
+      <div class="card" style="box-shadow:none;background:var(--soft);margin-top:10px">
+        <div class="bline row"><span style="flex:1">ซิงก์ล่าสุด</span><span class="tiny num">${lastCloud?lastCloud.toLocaleTimeString('th-TH'):'—'}</span></div>
+        <div class="bline row"><span style="flex:1">ข้อมูลบนเครื่องนี้</span><span class="tiny num">${S.tx.length} รายการ · ${dataKB()} KB</span></div>
+        ${cloudErr?`<div class="bline tiny neg">⚠️ ${esc(cloudErr)}</div>`:''}
+      </div>
+      <button class="btn full" id="cSync" style="margin-top:14px">🔄 ซิงก์เดี๋ยวนี้</button>
+      <div class="row" style="margin-top:9px;gap:8px">
+        <button class="btn ghost" id="cUp" style="flex:1">⬆️ อัปทับคลาวด์</button>
+        <button class="btn ghost" id="cDown" style="flex:1">⬇️ ดึงทับเครื่องนี้</button></div>
+      <button class="btn ghost full" id="cOut" style="margin-top:12px">ออกจากระบบ</button>
+      <div class="info" style="margin-top:12px"><span>⚡</span><span>ปกติซิงก์ให้เองทุกครั้งที่แก้ไข และตอนเปิด/สลับกลับมาที่แอป — 2 ปุ่มล่างใช้เฉพาะตอนข้อมูลชนกัน</span></div>`);
+    $('#cSync').onclick=async()=>{await cloudSyncNow();draw();toast('ซิงก์เรียบร้อย ☁️');};
+    $('#cUp').onclick=async()=>{S.updatedAt=Date.now();const ok=await cloudPush();draw();toast(ok?'อัปโหลดทับคลาวด์แล้ว':'ไม่สำเร็จ: '+cloudErr);};
+    $('#cDown').onclick=async()=>{S.updatedAt=0;const ok=await cloudPull();draw();toast(ok?'ดึงจากคลาวด์แล้ว':'คลาวด์ยังไม่มีข้อมูล');};
+    $('#cOut').onclick=async()=>{try{await sb.auth.signOut();}catch(e){}sbUser=null;paintSync();draw();toast('ออกจากระบบแล้ว');};
+  };
+  draw();
 }
 /* =========== EXPORT / IMPORT =========== */
 function download(name,c,mime){const b=new Blob([c],{type:mime}),u=URL.createObjectURL(b);
@@ -1697,7 +1863,7 @@ function importCSV(){
       const col=(...ns)=>{for(const n of ns){const i=head.findIndex(h=>h.includes(n));if(i>=0)return i;}return-1;};
       let iD=col('วันที่','date'),iT=col('ประเภท','type'),iC=col('หมวด','category'),iN=col('ชื่อ','บันทึก','note'),iA=col('จำนวน','ยอด','amount');
       if(iD<0)iD=0;if(iT<0)iT=1;if(iC<0)iC=2;if(iN<0)iN=3;if(iA<0)iA=4;
-      const wid=(payWallets()[0]||S.wallets[0]).id;
+      const fp=firstPay(); if(!fp){toast('เพิ่มกระเป๋าก่อนนำเข้าข้อมูลนะคะ 👛');return;} const wid=fp.id;
       const out=[];let bad=0,unk=0;
       rows.slice(1).forEach(r2=>{
         const d=normDate(r2[iD]||'');const a=parseFloat(String(r2[iA]||'').replace(/[^\d.-]/g,''));
@@ -1755,7 +1921,8 @@ function fixSeed(){
     {id:uid(),type:'out',name:'ให้พ่อแม่',amount:3000,cat:'parents',day:25,on:true,posted:{}}];
   save();render();toast('ใส่ชุดรายการประจำให้แล้ว 📅');}
 function seed(){
-  const w=(payWallets()[0]||S.wallets[0]).id;
+  if(!hasWal())S.wallets=[{id:uid(),name:'เงินสด',emoji:'👛',kind:'cash',open:0,note:'เงินสดในกระเป๋า'}];
+  const w=firstPay().id;
   const pool=['food','coffee','food','transit','food','market','online','drink','taxi','movie','party','food'];
   const now=new Date();
   S.tx.push({id:uid(),type:'in',amount:30000,cat:'salary',note:'เงินเดือน',date:key(new Date(now.getFullYear(),now.getMonth(),1)),ts:Date.now(),w});
@@ -1795,7 +1962,7 @@ async function refreshApp(){
 }
 /* =========== EVENTS =========== */
 document.addEventListener('click',e=>{
-  const b=e.target.closest('[data-go],[data-sub],[data-backplan],[data-menu],[data-p],[data-plan],[data-step],[data-side],[data-tside],[data-rside],[data-ctab],[data-tx],[data-k],[data-atab],[data-acat],[data-acsearch],[data-anote],[data-adate],[data-wsel],[data-wsel2],[data-ccm],[data-adebt],[data-add],[data-closeadd],[data-refresh],[data-sync],[data-day],[data-wfil],[data-wpick],[data-mpick],[data-reorder],[data-dayb],[data-newwal],[data-newcard],[data-editwal],[data-paycard],[data-newcat],[data-editcat],[data-budget],[data-newgoal],[data-editgoal],[data-slot],[data-newfix],[data-editfix],[data-postall],[data-fixseed],[data-newdebt],[data-editdebt],[data-debtd],[data-dslot],[data-payd],[data-dhist],[data-newlend],[data-editlend],[data-newmemo],[data-memo],[data-editname],[data-export],[data-seed]');
+  const b=e.target.closest('[data-go],[data-sub],[data-backplan],[data-menu],[data-p],[data-plan],[data-step],[data-side],[data-tside],[data-rside],[data-ctab],[data-tx],[data-k],[data-atab],[data-acat],[data-acsearch],[data-anote],[data-adate],[data-wsel],[data-wsel2],[data-ccm],[data-adebt],[data-add],[data-closeadd],[data-refresh],[data-sync],[data-cloud],[data-day],[data-wfil],[data-wpick],[data-mpick],[data-reorder],[data-dayb],[data-newwal],[data-newcard],[data-editwal],[data-paycard],[data-newcat],[data-editcat],[data-budget],[data-newgoal],[data-editgoal],[data-slot],[data-newfix],[data-editfix],[data-postall],[data-fixseed],[data-newdebt],[data-editdebt],[data-debtd],[data-dslot],[data-payd],[data-dhist],[data-newlend],[data-editlend],[data-newmemo],[data-memo],[data-editname],[data-export],[data-seed]');
   if(!b)return;const d=b.dataset;
   if(d.add!==undefined&&b.classList.contains('fab'))return openAdd(AD.tab||'out');
   if(d.closeadd)return closeAdd();
@@ -1816,7 +1983,7 @@ document.addEventListener('click',e=>{
     if(m==='reset'){openMd(`<h3>🗑️ ล้างข้อมูลทั้งหมด?</h3><p class="tiny muted">รายการ ${S.tx.length} รายการ งบ กระเป๋า และเป้าหมายจะถูกลบถาวรค่ะ</p>
       <div class="row" style="margin-top:16px;gap:9px"><button class="btn ghost" id="rNo" style="flex:1">ยกเลิก</button><button class="btn warn" id="rYes" style="flex:1">ล้างเลย</button></div>`);
       $('#rNo').onclick=closeMd;
-      $('#rYes').onclick=()=>{S={profile:{name:'กระเป๋าตังของฉัน'},tx:[],wallets:[{id:uid(),name:'เงินสด',emoji:'👛',kind:'cash',open:0}],
+      $('#rYes').onclick=()=>{S={profile:{name:'กระเป๋าตังของฉัน'},tx:[],wallets:[],
         cats:JSON.parse(JSON.stringify(DEF_CATS)),budgets:{},dailyBudget:0,fixed:[],goals:[],debts:[],lends:[],memos:[],
         homeOrder:HOME_SEC.map(x=>x.id),homeHide:{},theme:S.theme};save();closeMd();go('home');toast('ล้างข้อมูลแล้ว');};return;}
     return goSub(m);}
@@ -1847,6 +2014,7 @@ document.addEventListener('click',e=>{
   if(d.newwal)return walSheet(null);
   if(d.newcard)return walSheet(null,'credit');
   if(d.sync)return syncSheet();
+  if(d.cloud)return cloudSheet();
   if(d.editwal)return walSheet(d.editwal);
   if(d.paycard){AD.ccMode='pay';AD.w2=d.paycard;openAdd('cc');AD.w2=d.paycard;renderAdd();return;}
   if(d.newcat)return catSheet(addOpen?(AD.tab==='in'?'in':'out'):catTab,null);
@@ -1896,9 +2064,9 @@ function migrate(){
   S.profile=S.profile||{name:'กระเป๋าตังของฉัน'};
   S.fixed=S.fixed||[];S.goals=S.goals||[];S.debts=S.debts||[];S.lends=S.lends||[];S.memos=S.memos||[];
   S.budgets=S.budgets||{};S.tx=S.tx||[];
-  if(!Array.isArray(S.wallets)||!S.wallets.length)S.wallets=[{id:'w_cash',name:'เงินสด',emoji:'👛',kind:'cash',open:0}];
-  const w0=S.wallets[0].id;
-  S.tx.forEach(t=>{if(!t.w)t.w=w0;});
+  if(!Array.isArray(S.wallets))S.wallets=[];
+  const w0=S.wallets[0]?S.wallets[0].id:null;
+  if(w0)S.tx.forEach(t=>{if(!t.w)t.w=w0;});
   const ids=HOME_SEC.map(x=>x.id);
   S.homeOrder=(Array.isArray(S.homeOrder)?S.homeOrder.filter(x=>ids.includes(x)):[]);
   ids.forEach(i=>{if(!S.homeOrder.includes(i))S.homeOrder.push(i);});
@@ -1912,7 +2080,11 @@ function migrate(){
   document.documentElement.dataset.theme=S.theme==='dark'?'dark':'light';
   $('#themeBtn').textContent=S.theme==='dark'?'☀️':'🌙';
   P={mode:'day',cursor:new Date()};TAB='home';SUB=null;
+  lastProbe=JSON.stringify({...S,updatedAt:0});
   $('#loading').remove();$('#app').hidden=false;paintSync();render();
+  loadCloudCfg();
+  if(CLOUD.url&&CLOUD.key){ sbInit().then(async()=>{ if(cloudReady()){await cloudPull(true);paintSync();} }).catch(()=>{}); }
+  setInterval(()=>{ try{ if(!document.hidden&&cloudReady())cloudPull(true); }catch(e){} },60000);
 })();
 </script>
 </body>
