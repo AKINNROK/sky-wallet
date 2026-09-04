@@ -60,6 +60,16 @@ h1,h2,h3,.cute{font-family:var(--cute)}
 .hsub{display:block;font-size:11.5px;color:rgba(255,255,255,.92);line-height:1.35}
 .hbtn{width:38px;height:38px;border-radius:13px;background:rgba(255,255,255,.24);display:grid;place-items:center;color:#fff;font-size:17px;flex:none}
 .hbtn:hover{background:rgba(255,255,255,.38)}
+.syncbtn{position:relative}
+.syncbtn svg{width:21px;height:21px;display:block;transition:transform .3s}
+.syncbtn .dot{position:absolute;right:5px;bottom:5px;width:10px;height:10px;border-radius:50%;background:#CBD5E1;border:2px solid rgba(255,255,255,.95);box-shadow:0 1px 3px rgba(10,50,100,.25)}
+.syncbtn.s-claude .dot{background:#34D399}
+.syncbtn.s-local .dot{background:#FBBF24}
+.syncbtn.s-memory .dot{background:#FB7185}
+.syncbtn.busy svg{animation:spin 1s linear infinite}
+.syncbtn.saved{animation:pop .5s ease}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pop{0%{transform:scale(1)}45%{transform:scale(1.2)}100%{transform:scale(1)}}
 .wallet{position:relative;z-index:2;margin-top:16px;background:rgba(255,255,255,.95);border-radius:20px;padding:14px 17px;box-shadow:0 6px 18px rgba(11,60,112,.16);display:flex;align-items:center;gap:14px}
 html[data-theme="dark"] .wallet{background:var(--card)}
 .wallet .lab{font-size:12px;color:var(--ink2)}
@@ -281,7 +291,9 @@ html[data-theme="dark"] .cat.on{background:var(--line)}
         <span class="mark brandimg" id="markLogo"></span>
         <span><span class="hname">Sky Wallet</span><span class="hsub">กระเป๋าตังของฉัน · แตะเพื่อรีเฟรช</span></span>
       </button>
-      <button class="hbtn" id="syncBtn" data-sync="1" aria-label="สถานะการเชื่อมต่อ" title="สถานะการเชื่อมต่อข้อมูล">☁️</button>
+      <button class="hbtn syncbtn" id="syncBtn" data-sync="1" aria-label="สถานะการเชื่อมต่อ" title="สถานะการเชื่อมต่อข้อมูล">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.4 18.4H7a4.6 4.6 0 01-.7-9.15A6.1 6.1 0 0118.1 10.9a3.95 3.95 0 01-.7 7.5z"/></svg>
+        <i class="dot"></i></button>
       <button class="hbtn" id="themeBtn" aria-label="สลับธีม">🌙</button>
       <button class="hbtn" data-go="menu" aria-label="เมนู">☰</button>
     </div>
@@ -400,11 +412,36 @@ const TH_D=['อา','จ','อ','พ','พฤ','ศ','ส'];
 const TH_M=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 const TH_MF=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
 const dLab=d=>`${d.getDate()} ${TH_M[d.getMonth()]} ${(d.getFullYear()+543)%100}`;
-let saveT=null,lastSave=null,syncing=false;
-const save=()=>{clearTimeout(saveT);saveT=setTimeout(async()=>{
-  const ok=await Store.set(KEY,JSON.stringify(S));
-  if(ok){lastSave=new Date();paintSync();}
-},250);};
+let saveT=null,lastSave=null,syncing=false,lastRaw=null,pulling=false;
+const save=()=>{clearTimeout(saveT);saveT=setTimeout(flushSave,250);};
+async function flushSave(){
+  clearTimeout(saveT);
+  const raw=JSON.stringify(S);
+  if(raw===lastRaw)return true;
+  const ok=await Store.set(KEY,raw);
+  if(ok){lastRaw=raw;lastSave=new Date();paintSync(true);}
+  return ok;
+}
+function hardSave(){ // synchronous fallback when the app is closing
+  try{if(Store.mode==='local'){const raw=JSON.stringify(S);localStorage.setItem(KEY,raw);lastRaw=raw;}}catch(e){}
+  flushSave();
+}
+async function autoPull(silent){
+  if(pulling)return;
+  try{if($('#md')&&$('#md').classList.contains('open'))return;}catch(e){}
+  pulling=true;
+  try{
+    const raw=await Store.get(KEY);
+    if(raw&&raw!==lastRaw){
+      const d=JSON.parse(raw);
+      S={...S,...d};migrate();lastRaw=raw;lastSave=new Date();
+      if(addOpen)renderAdd();
+      render();paintSync(true);
+      if(!silent)toast('ดึงข้อมูลล่าสุดมาแล้ว ✓');
+    }
+  }catch(e){}
+  pulling=false;
+}
 function devName(){
   let ua='';try{ua=navigator.userAgent||'';}catch(e){}
   let w=1024;try{w=window.innerWidth||1024;}catch(e){}
@@ -416,14 +453,16 @@ function devName(){
 }
 const SYNC={claude:{e:'☁️',n:'ซิงก์ข้ามอุปกรณ์',c:'var(--in)',
     d:'ข้อมูลเก็บกับบัญชี Claude ของคุณ เปิดจากมือถือ ไอแพด หรือแม็คบุ๊ก ก็เห็นชุดเดียวกันอัตโนมัติ'},
-  local:{e:'💾',n:'บันทึกในเครื่องนี้',c:'var(--gold)',
+  local:{e:'🖥️',n:'บันทึกในเครื่องนี้',c:'var(--gold)',
     d:'ข้อมูลอยู่ในเบราว์เซอร์ของอุปกรณ์นี้เท่านั้น ยังไม่ซิงก์ไปเครื่องอื่น — ใช้ “สำรองข้อมูล” แล้ว “นำเข้า” ที่อีกเครื่องเพื่อย้ายข้อมูล'},
   memory:{e:'⚠️',n:'โหมดชั่วคราว',c:'var(--out)',
     d:'อุปกรณ์นี้ไม่อนุญาตให้บันทึกถาวร ข้อมูลจะหายเมื่อปิดหน้า — กรุณาสำรองข้อมูลก่อนปิดทุกครั้ง'}};
-function paintSync(){
+function paintSync(justSaved){
   const b=$('#syncBtn');if(!b)return;
-  const st=SYNC[Store.mode]||SYNC.memory;
-  b.textContent=syncing?'🔄':st.e;
+  b.classList.remove('s-claude','s-local','s-memory');
+  b.classList.add('s-'+(SYNC[Store.mode]?Store.mode:'memory'));
+  b.classList.toggle('busy',!!syncing);
+  if(justSaved){b.classList.remove('saved');void b.offsetWidth;b.classList.add('saved');}
 }
 function dataKB(){try{return Math.round(JSON.stringify(S).length/1024*10)/10;}catch(e){return 0;}}
 function syncSheet(){
@@ -439,7 +478,10 @@ function syncSheet(){
         <div class="bline row"><span style="flex:1">บันทึกล่าสุด</span><span class="tiny num">${lastSave?lastSave.toLocaleTimeString('th-TH'):'ยังไม่มีการแก้ไข'}</span></div>
         <div class="bline row"><span style="flex:1">ข้อมูลทั้งหมด</span><span class="tiny num">${S.tx.length} รายการ · ${S.wallets.length} กระเป๋า</span></div>
         <div class="bline row"><span style="flex:1">ขนาดข้อมูล</span><span class="tiny num">${dataKB()} KB</span></div>
+        <div class="bline row"><span style="flex:1">บันทึกอัตโนมัติ</span><span class="tag ok">เปิดอยู่ ✓</span></div>
+        <div class="bline row"><span style="flex:1">ดึงข้อมูลล่าสุดอัตโนมัติ</span><span class="tag ok">เปิดอยู่ ✓</span></div>
       </div>
+      <div class="info" style="margin-top:10px"><span>⚡</span><span>ทุกครั้งที่แก้ไข ระบบบันทึกให้เองทันที และจะดึงข้อมูลล่าสุดให้อัตโนมัติเมื่อ <b>เปิดแอป · สลับกลับมาที่แอป · หรือเปิดหลายหน้าต่างพร้อมกัน</b> — ไม่ต้องกดปุ่มใดๆ</span></div>
       <div class="row" style="margin-top:14px;gap:9px">
         <button class="btn ghost" id="syBk" style="flex:1">💾 สำรองไฟล์</button>
         <button class="btn" id="syGo" style="flex:1.4">🔄 ซิงก์เดี๋ยวนี้</button></div>
@@ -447,7 +489,7 @@ function syncSheet(){
     $('#syBk').onclick=()=>{download(`sky-wallet-${key(new Date())}.json`,JSON.stringify(S,null,2),'application/json');toast('สำรองข้อมูลแล้ว ✓');};
     $('#syGo').onclick=async()=>{
       syncing=true;paintSync();draw();
-      const ok=await Store.set(KEY,JSON.stringify(S));
+      const ok=await flushSave();
       let back=null;try{back=await Store.get(KEY);}catch(e){}
       syncing=false;lastSave=new Date();paintSync();draw();
       toast(ok&&back?`ซิงก์เรียบร้อย ${st.e} ${S.tx.length} รายการ`:'ซิงก์ไม่สำเร็จ ลองสำรองไฟล์ไว้ก่อนนะคะ');
@@ -1714,7 +1756,7 @@ const go=t=>{TAB=t;SUB=null;render();};
 const goSub=s=>{SUB=s;render();};
 async function refreshApp(){
   const lg=$('#markLogo');if(lg){lg.classList.remove('spin');void lg.offsetWidth;lg.classList.add('spin');}
-  try{const raw=await Store.get(KEY);if(raw){const d=JSON.parse(raw);S={...S,...d};migrate();}}catch(e){}
+  try{const raw=await Store.get(KEY);if(raw){const d=JSON.parse(raw);S={...S,...d};migrate();lastRaw=raw;}}catch(e){}
   P={mode:'day',cursor:new Date()};TAB='home';SUB=null;homeSide='out';homeWallet='all';txSide='all';txQ='';
   render();toast('อัปเดตข้อมูลล่าสุดแล้ว ☁️');
 }
@@ -1807,6 +1849,14 @@ document.addEventListener('click',e=>{
 });
 $('#themeBtn').onclick=()=>{S.theme=S.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=S.theme;
   $('#themeBtn').textContent=S.theme==='dark'?'☀️':'🌙';save();};
+try{
+  document.addEventListener('visibilitychange',()=>{ if(document.hidden)hardSave(); else autoPull(); });
+  window.addEventListener('focus',()=>autoPull());
+  window.addEventListener('pageshow',()=>autoPull(true));
+  window.addEventListener('pagehide',hardSave);
+  window.addEventListener('beforeunload',hardSave);
+  window.addEventListener('storage',e=>{ if(e.key===KEY&&e.newValue&&e.newValue!==lastRaw)autoPull(); });
+}catch(e){}
 /* =========== BOOT =========== */
 function migrate(){
   if(!S.cats||!S.cats.out)S.cats=JSON.parse(JSON.stringify(DEF_CATS));
@@ -1824,7 +1874,7 @@ function migrate(){
 (async function(){
   Store.init();
   const raw=await Store.get(KEY);
-  if(raw){try{S={...S,...JSON.parse(raw)};}catch(e){}}
+  if(raw){try{S={...S,...JSON.parse(raw)};lastRaw=raw;}catch(e){}}
   migrate();
   document.documentElement.dataset.theme=S.theme==='dark'?'dark':'light';
   $('#themeBtn').textContent=S.theme==='dark'?'☀️':'🌙';
