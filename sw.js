@@ -1,5 +1,5 @@
 /* Sky Wallet service worker — offline first */
-const CACHE = 'sky-wallet-v2-2';
+const CACHE = 'sky-wallet-v3-1';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './icon-maskable-512.png',
